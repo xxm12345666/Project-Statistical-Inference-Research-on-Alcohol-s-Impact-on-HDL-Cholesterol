@@ -1,0 +1,277 @@
+---
+title: "Final Project"
+author: "Group 20"
+date: "12/06/2023"
+output:
+  pdf_document: default
+  html_document: default
+---
+
+```{r, message=FALSE}
+# install.packages('NHANES')
+library(NHANES)
+library(dplyr)
+library(ggplot2)
+library(car)
+```
+
+# 2. Methods
+**remove duplicates**  
+```{r, message=FALSE}
+data(NHANES)
+NHANES <- NHANES[!duplicated(NHANES$ID), ]
+dim(NHANES)
+```
+
+**data processing**  
+```{r, message=FALSE}
+# heavy drink
+NHANES$AlcoholTotal <- NHANES$AlcoholDay * NHANES$AlcoholYear / 365
+NHANES$heavydrink <- 'No'
+NHANES$heavydrink[(NHANES$Gender=='male')&(NHANES$AlcoholTotal>=2)] <- 'Yes'
+NHANES$heavydrink[(NHANES$Gender=='female')&(NHANES$AlcoholTotal>=1)] <- 'Yes'
+# drinking days per year / 100
+NHANES$DrinkingDaysPerYear <- NHANES$AlcoholYear / 100
+```
+
+```{r, message=FALSE}
+# Age: centered
+NHANES$AgeC <- NHANES$Age - mean(NHANES$Age)
+# Race: set White as reference
+NHANES$Race1 <- relevel(NHANES$Race1, ref='White')
+# Poverty: not poverty as reference group
+NHANES$Poverty1 <- 5 - NHANES$Poverty
+# Depressed: regroup
+NHANES$Depressed1 <- ifelse(NHANES$Depressed=='None', 'No',
+  ifelse(NHANES$Depressed %in% c('Several', 'Most'), 'Yes', NA))
+```
+
+**remove non-drinkers & NA**  
+```{r, message=FALSE}
+NHANES1 <- NHANES[NHANES$AlcoholYear > 0, ]
+NHANES1 <- na.omit(NHANES1[, c('DirectChol', 'AgeC', 'Race1', 'Gender', 'Poverty1', 'Education', 'BMI_WHO', 'Diabetes', 'Smoke100', 'Depressed1', 'PhysActive',
+  'AlcoholYear', 'DrinkingDaysPerYear', 'heavydrink')])
+dim(NHANES1)
+```
+
+
+summary(NHANES1$Race1)
+
+**Initial Model**  
+```{r, message=FALSE}
+model.initial <- lm(DirectChol ~ AgeC + Gender + Race1 + 
+  Poverty1 + Education +
+  BMI_WHO + Diabetes + Smoke100 + Depressed1 + PhysActive +
+  AlcoholYear + heavydrink +
+  AlcoholYear*Gender + heavydrink*Gender +
+  AlcoholYear*AgeC + heavydrink*AgeC +
+  AlcoholYear*Poverty1 + heavydrink*Poverty1 +
+  AlcoholYear*Race1 + heavydrink*Race1, data = NHANES1)
+```
+
+```{r, message=FALSE}
+par(mfrow = c(2, 2))
+plot(model.initial)
+# histogram before log
+ggplot(data=NHANES1) + geom_histogram(mapping = aes(x = DirectChol))
+# histogram after log
+ggplot(data=NHANES1) + geom_histogram(mapping = aes(x = log(DirectChol)))
+```
+1. QQ-plot => residual not normally distributed
+2. residual plots => not constant variance
+3. histogram of Y => right skewed
+=> log tranformation to Y
+
+# Model
+```{r, message=FALSE}
+model <- lm(log(DirectChol) ~ AgeC + Gender + Race1 + 
+  Poverty1 + Education +
+  BMI_WHO + Diabetes + Smoke100 + Depressed1 + PhysActive +
+  DrinkingDaysPerYear + heavydrink + 
+  DrinkingDaysPerYear*AgeC + heavydrink*AgeC +
+  DrinkingDaysPerYear*Poverty1 + heavydrink*Poverty1, data = NHANES1)
+summary(model)
+```
+
+
+# Model Diagnostics
+**LINE**  
+```{r}
+# normality
+car::qqPlot(model)
+# constant variance
+par(mfrow = c(2, 2))
+plot(model)
+```
+1. no clear pattern of the distribution of residuals over the predicted range => constant variance  
+2. QQ-plot => normality  
+
+```{r}
+# linearity
+car::residualPlots(model, type="response")
+```
+p-value > 0.05, not reject H0, linearity
+
+```{r}
+# independence
+durbinWatsonTest(model)
+```
+p-value > 0.05, not reject H0, rho=0, independent
+
+**multicollinearity**  
+```{r}
+# multicollinearity
+car::vif(model, type='predictor')
+```
+From the GVIF^(1/(2Df)) values in the output, none of the values exceed sqrt(5), which is equivalent to VIF < 5, we do not observe any potential collinearity issues.
+
+**influence diagnostics**  
+
+```{r}
+library(olsrr)
+influence = data.frame(Residual = resid(model), Rstudent = rstudent(model),
+HatDiagH = hat(model.matrix(model)),
+CovRatio = covratio(model), DFFITS = dffits(model),
+COOKsDistance = cooks.distance(model))
+
+ols_plot_dffits(model)
+influence[order(abs(influence$DFFITS),decreasing = T),] %>% head()
+```
+
+```{r}
+ols_plot_cooksd_bar(model)
+influence[order(influence$COOKsDistance,decreasing = T),] %>% head()
+```
+
+```{r}
+ols_plot_resid_lev(model)
+# high leverage
+influence[order(influence$HatDiagH,decreasing = T),] %>% head()
+# high studentized residual
+influence[order(influence$Rstudent,decreasing = T),] %>% head()
+```
+
+**refit the model after removing outliers**  
+```{r}
+obs <- rownames(influence[(abs(influence$HatDiagH)>0.019) & (abs(influence$Rstudent)>2),])
+obs <- c(obs, c('888', '2109', '1008', '885'))
+NHANES1.rm <- NHANES1[-as.numeric(obs), ]
+model.rm <- lm(log(DirectChol)~AgeC + Gender + Race1 + 
+  Poverty1 + Education +
+  BMI_WHO + Diabetes + Smoke100 + Depressed1 + PhysActive +
+  DrinkingDaysPerYear + heavydrink + 
+  DrinkingDaysPerYear*AgeC + heavydrink*AgeC +
+  DrinkingDaysPerYear*Poverty1 + heavydrink*Poverty1, data = NHANES1.rm)
+summary(model.rm)
+```
+no obvious difference
+
+
+
+
+```{r}
+library(gridExtra)
+library(broom)
+
+plots <- list()
+
+plot <- ggplot(data=NHANES1) + 
+  geom_histogram(mapping = aes(x = DirectChol), bins = 21) + 
+  ggtitle(paste("Distribution of Response Variable"))
+plots[[1]] <- plot
+
+plot <- ggplot(data=NHANES1) + 
+  geom_histogram(mapping = aes(x = log(DirectChol)), bins = 21) + 
+  ggtitle(paste("Distribution of Log Transformed Response Variable"))
+plots[[2]] <- plot
+
+plot <- ggplot(augment(model.initial), aes(.fitted, sqrt(abs(.resid)))) +
+  geom_point() +
+  geom_smooth(se = FALSE, method = "loess", color = "blue") + 
+  ggtitle("Scale-Location Plot for Non-Logged Response Variable") +
+  theme_minimal()
+plots[[3]] <- plot
+
+plot <- ggplot(augment(model), aes(.fitted, sqrt(abs(.resid)))) +
+  geom_point() +
+  geom_smooth(se = FALSE, method = "loess", color = "blue") + 
+  ggtitle("Scale-Location Plot for Logged Response Variable") +
+  theme_minimal()
+plots[[4]] <- plot
+
+plot <- ggplot(augment(model.initial), aes(sample = .resid)) +
+    geom_qq() +
+    stat_qq_line(linetype = "dotdash", color = "red") + 
+    ggtitle("QQ Plot for Non-Logged Residuals") +
+    theme_minimal()
+plots[[5]] <- plot
+
+plot <- ggplot(augment(model), aes(sample = .resid)) +
+    geom_qq() +
+    stat_qq_line(linetype = "dotdash", color = "red") + 
+    ggtitle("QQ Plot for Logged Residuals") +
+    theme_minimal()
+plots[[6]] <- plot
+
+grid.arrange(grobs = plots, ncol = 2)
+
+```
+
+```{r}
+plots <- list()
+
+# linearity
+# car::residualPlots(model, type = "response", subset = ~ AgeC + Poverty1 + DrinkingDaysPerYear)
+
+data_subset <- data.frame(AgeCentered = NHANES1$AgeC, Poverty = NHANES1$Poverty1, DrinkingDaysPerYear = NHANES1$AlcoholYear, residuals = residuals(model))
+
+plot <- ggplot(data_subset, aes(x = AgeCentered, y = residuals)) +
+  geom_point(shape = 1) +
+  geom_smooth() +
+  labs(title = "Residuals for AgeCenter - Linearity") + 
+  theme(plot.title = element_text(size = 12))
+plots[[1]] <- plot
+
+plot <- ggplot(data_subset, aes(x = Poverty, y = residuals)) +
+  geom_point(shape = 1) +
+  geom_smooth() +
+  labs(title = "Residuals for Poverty - Linearity") +
+  theme(plot.title = element_text(size = 12))
+plots[[2]] <- plot
+
+plot <- ggplot(data_subset, aes(x = DrinkingDaysPerYear, y = residuals)) +
+  geom_point(shape = 1) +
+  geom_smooth() +
+  labs(title = "Residuals for DrinkingDaysPerYear - Linearity") +
+  theme(plot.title = element_text(size = 12))
+plots[[3]] <- plot
+
+
+# Equal Variance
+plot <- ggplot(augment(model), aes(.fitted, sqrt(abs(.resid)))) +
+  geom_point() +
+  geom_smooth(se = FALSE, method = "loess", color = "blue") + 
+  ggtitle("Scale-Location Plot - Equal Variance") +
+  theme(plot.title = element_text(size = 12))
+plots[[4]] <- plot
+
+# Normality
+plot <- ggplot(augment(model), aes(sample = .resid)) +
+    geom_qq() +
+    stat_qq_line(linetype = "dotdash", color = "blue") + 
+    ggtitle("QQ Plot - Normality") +
+    theme(plot.title = element_text(size = 12))
+plots[[5]] <- plot
+
+
+plot <- ggplot(augment(model), aes(.fitted, .resid)) +
+  geom_point() +
+  ggtitle("Residuals vs Fitted") +
+  geom_abline(slope = 0, intercept = 0, linetype = "dashed", color = "blue") +
+  theme(plot.title = element_text(size = 12))
+plots[[6]] <- plot
+
+grid.arrange(grobs = plots, ncol = 3)
+
+```
+
